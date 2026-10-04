@@ -53,6 +53,14 @@ and is the reference path consumed by the gtest gold.
 
 Outputs (tuple): `x_next`, and the intermediate `x0`, both shaped like `xt`.
 
+All three accepted sigma layouts are normalised to the same per-row semantics: a
+1-element tensor becomes a 0-dim scalar, and one value per flattened packed row
+becomes `xt.shape[:-1] + (1,)`. A bare `[R]` sigma therefore always means "one
+value per row", never "one value per channel" — left unreshaped it would
+broadcast against the last axis and silently return wrong values whenever
+`R == C`. The Triton and CUDA backends index sigma by flattened row, so all three
+backends agree on every documented input form.
+
 ## Dispatch Behavior
 
 `forward` resolves to the registered candidate named on the command line: the

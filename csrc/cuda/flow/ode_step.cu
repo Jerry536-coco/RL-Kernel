@@ -1,28 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 RL-Kernel Contributors
 //
-// MiniMax-H3 deterministic rectified-flow Euler step (WS1 scheduler).
-//
-// Declared strict contract (RFC #420, section 2 "Scheduler fingerprint"):
+// MiniMax-H3 deterministic rectified-flow Euler step (RFC #420).
 //
 //     x0     = xt + sigma * v
 //     r      = sigma_next / sigma
 //     x_next = r * xt + (1 - r) * x0
 //
-// All arithmetic is fp32 with one epilogue cast to the storage dtype.
+// Two things are load-bearing:
+//   1. Every step uses an explicitly-rounded intrinsic.  nvcc contracts a*b+c
+//      into an FMA by default, fusing two roundings into one; that would break
+//      op-for-op equality with the PyTorch reference.
+//   2. The blend keeps the declared expression order.  The algebraically equal
+//      xt + (sigma - sigma_next) * v reassociates the sum and is a different
+//      fp32 program (ablation probe H13).  Do not "simplify" it.
 //
-// The blend keeps the declared expression order.  The algebraically identical
-// `xt + (sigma - sigma_next) * v` is a *different* fp32 program: reassociating
-// the sum changes the rounding of roughly a quarter of the elements and would
-// move the strict trajectory (ablation probe H13).  Do not "simplify" it.
-//
-// Every arithmetic step goes through an explicitly-rounded intrinsic so the
-// device result matches the PyTorch reference op-for-op: nvcc contracts a*b+c
-// into an FMA by default, which would silently fuse two roundings into one.
-//
-// Pure elementwise with a per-row sigma broadcast: no cross-row reduction, so
-// batch size, batch position and unrelated rows cannot change a row's bytes
-// (Axis-A bitwise invariance).
+// Element-wise with a per-row sigma broadcast: no cross-row reduction, so batch
+// size, batch position and unrelated rows cannot change a row's bytes.
 
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -213,6 +207,11 @@ std::vector<torch::Tensor> ode_step_backward_cuda(
               "grad_next must be a contiguous CUDA tensor");
   TORCH_CHECK(grad_x0.is_cuda() && grad_x0.is_contiguous(),
               "grad_x0 must be a contiguous CUDA tensor");
+  // The kernel launches on xt's device and dereferences both gradient pointers.
+  // A gradient left on another device would only fail — or, with peer access
+  // enabled, silently read remote memory — at execution time, so reject it here.
+  TORCH_CHECK(grad_next.device() == xt.device() && grad_x0.device() == xt.device(),
+              "upstream gradients must share xt's device");
   TORCH_CHECK(grad_next.sizes() == xt.sizes() && grad_x0.sizes() == xt.sizes(),
               "upstream gradients must share xt's shape");
   const at::cuda::OptionalCUDAGuard device_guard(device_of(xt));

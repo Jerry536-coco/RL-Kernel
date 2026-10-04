@@ -124,6 +124,46 @@ def test_scalar_sigma_path() -> None:
     assert x_next.shape == xt.shape and x0.shape == xt.shape
 
 
+def test_per_row_sigma_flat_vector_form() -> None:
+    """A bare ``[R]`` sigma must mean "one per row", not "one per channel".
+
+    Left unreshaped, ``[R]`` broadcasts against the *last* axis of a ``[R, C]``
+    input.  With ``R == C`` that raises no error and silently returns wrong
+    values, so the shape is chosen deliberately here.
+    """
+    rows = channels = 8
+    xt, v, sigma, sigma_next = _inputs(rows=rows, channels=channels)
+    op = NativeH3OdeStepOp()
+    canonical = op.forward_fp32(xt, v, sigma, sigma_next)
+    flat = op.forward_fp32(xt, v, sigma.reshape(rows), sigma_next.reshape(rows))
+    assert torch.equal(flat[0], canonical[0])
+    assert torch.equal(flat[1], canonical[1])
+
+
+def test_per_row_sigma_with_3d_xt() -> None:
+    """``[B*S]`` and ``[B*S, 1]`` sigma must both work against ``[B, S, C]`` xt."""
+    batch, seq, channels = 2, 4, 24
+    generator = torch.Generator().manual_seed(3)
+    xt = torch.randn(batch, seq, channels, generator=generator)
+    v = torch.randn(batch, seq, channels, generator=generator)
+    sigma, sigma_next = _sigma_pair(batch * seq)
+    op = NativeH3OdeStepOp()
+
+    canonical = op.forward_fp32(xt, v, sigma, sigma_next)
+    flat = op.forward_fp32(xt, v, sigma.reshape(-1), sigma_next.reshape(-1))
+    assert canonical[0].shape == xt.shape
+    assert torch.equal(flat[0], canonical[0])
+    assert torch.equal(flat[1], canonical[1])
+
+
+def test_fail_closed_on_3d_sigma_layout_mismatch() -> None:
+    """A 3-D xt with a sigma that cannot cover its rows must be rejected."""
+    xt = torch.randn(2, 4, 24)
+    v = torch.randn(2, 4, 24)
+    with pytest.raises(ValueError, match="one value per packed row"):
+        NativeH3OdeStepOp().forward_fp32(xt, v, torch.full((4, 1), 0.5), torch.full((4, 1), 0.25))
+
+
 def test_shifted_grid_is_monotone() -> None:
     sigma, sigma_next = _sigma_pair(32)
     assert bool((sigma > sigma_next).all())
